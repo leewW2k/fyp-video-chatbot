@@ -6,7 +6,7 @@ dotenv.load_dotenv()
 
 def main():
     client = openai_service.OpenAIService()
-    client.create_response()
+    client.create_prompt_response()
 
 
 if __name__ == "__main__":
