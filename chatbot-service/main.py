@@ -1,13 +1,14 @@
 import openai_service
 import dotenv
+import asyncio
 
 dotenv.load_dotenv()
 
 
-def main():
+async def main():
     client = openai_service.OpenAIService()
-    client.create_prompt_response()
+    await client.create_prompt_response()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

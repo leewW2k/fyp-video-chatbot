@@ -1,12 +1,11 @@
 # Add OpenAI library
 import os
-from openai import AzureOpenAI
+from openai import AsyncAzureOpenAI
 import logging
 
 
 class OpenAIService:
     def __init__(self):
-        self.system_message = "You are a helpful assistant."
         self.azure_endpoint = os.environ.get("YOUR_ENDPOINT_NAME")
         self.api_key = os.environ.get("YOUR_API_KEY")
         self.deployment_name = os.environ.get("YOUR_DEPLOYMENT_NAME")
@@ -14,11 +13,21 @@ class OpenAIService:
         self.client = self.initiate_client()
         self.logger = logging.getLogger()
         logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.DEBUG)
+        self.system_message = ""
+        self.grounding_text = ""
+        try:
+            self.system_message = open(file="system.txt", encoding="utf8").read().strip()
+        except Exception as ex:
+            self.logger.warning(ex)
+        try:
+            self.grounding_text = open(file="grounding.txt", encoding="utf8").read().strip()
+        except Exception as ex:
+            self.logger.warning(ex)
         self.messages_array = [{"role": "system", "content": self.system_message}]
 
     def initiate_client(self):
         try:
-            return AzureOpenAI(
+            return AsyncAzureOpenAI(
                 azure_endpoint=self.azure_endpoint,
                 api_key=self.api_key,
                 api_version=self.api_version
@@ -26,11 +35,11 @@ class OpenAIService:
         except Exception as ex:
             self.logger.warning(ex)
 
-    def create_response(self, prompt: str):
-        response = self.client.chat.completions.create(
+    async def create_response(self, prompt: str):
+        response = await self.client.chat.completions.create(
             model=self.deployment_name,
             messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "system", "content": self.system_message},
                 {"role": "user", "content": prompt}
             ]
         )
@@ -39,10 +48,10 @@ class OpenAIService:
         # Print the response
         print("Response: " + generated_text + "\n")
 
-    def create_response_history(self, prompt: str):
-        self.messages_array.append({"role": "user", "content": prompt})
+    async def create_response_history(self, prompt: str):
+        self.messages_array.append({"role": "user", "content": self.grounding_text + prompt})
 
-        response = self.client.chat.completions.create(
+        response = await self.client.chat.completions.create(
             model=self.deployment_name,
             messages=self.messages_array
         )
@@ -52,7 +61,7 @@ class OpenAIService:
         # Print the response
         print("Response: " + generated_text + "\n")
 
-    def create_prompt_response(self, history=True):
+    async def create_prompt_response(self, history=True):
         while True:
             # Get input text
             input_text = input("Enter the prompt (or type 'quit' to exit): ")
@@ -66,6 +75,6 @@ class OpenAIService:
             self.logger.info("History Enabled: " + str(history))
             if history:
                 self.messages_array = [{"role": "system", "content": self.system_message}]
-                self.create_response_history(input_text)
+                await self.create_response_history(input_text)
             else:
-                self.create_response(input_text)
+                await self.create_response(input_text)
