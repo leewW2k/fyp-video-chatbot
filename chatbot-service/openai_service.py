@@ -126,7 +126,7 @@ class OpenAIService:
             print(retrieval_results)
 
             # Extract context and metadata (timestamps) from the retrieved documents
-            context = " ".join([doc.page_content for doc in retrieval_results])
+            context = " ".join([f"[{doc.metadata.get('start')} - {doc.metadata.get('end')}]" + doc.page_content for doc in retrieval_results])
             timestamps = " ".join([f"[{doc.metadata.get('start')} - {doc.metadata.get('end')}]" for doc in retrieval_results])
 
             combine_docs_chain = create_stuff_documents_chain(llm, prompt)

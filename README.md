@@ -18,4 +18,4 @@ Rename [.env-template](.env-template) to ```.env```
 
 ### Starting FastAPI Server
 
-Run ```uvicorn api.main:app --port 8081 --reload```
+Run ```uvicorn api.main:app --port 8080 --reload```
