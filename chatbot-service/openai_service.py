@@ -3,25 +3,29 @@ import json
 import os
 
 import chromadb
+import numpy as np
+import pymongo
 from dotenv import load_dotenv
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.chains.retrieval import create_retrieval_chain
+from langchain_core.documents import Document
 from langchain_openai import AzureChatOpenAI
 
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_core.prompts import PromptTemplate
 from openai import AsyncAzureOpenAI
+from sklearn.metrics.pairwise import cosine_similarity
 
 load_dotenv()
 
 
 class OpenAIService:
     def __init__(self):
-        self.azure_endpoint = os.environ.get("YOUR_ENDPOINT_NAME")
-        self.api_key = os.environ.get("YOUR_API_KEY")
+        self.azure_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+        self.api_key = os.environ.get("AZURE_OPENAI_API_KEY")
         self.deployment_name = os.environ.get("YOUR_DEPLOYMENT_NAME")
-        self.api_version = os.environ.get("YOUR_API_VERSION")
+        self.api_version = os.environ.get("OPENAI_API_VERSION")
         self.client = self.initiate_client()
         self.system_message = ""
         self.grounding_text = ""
@@ -34,15 +38,13 @@ class OpenAIService:
         except Exception as ex:
             print(ex)
         self.messages_array = [{"role": "system", "content": self.system_message}]
-        self.persistent_client = chromadb.PersistentClient(path="./vector_store_003")
         self.embedding_function = SentenceTransformerEmbeddings(
             model_name="all-MiniLM-L6-v2"
         )
-        self.vectordb = Chroma(
-            embedding_function=self.embedding_function,
-            persist_directory="vector_store_003",
-            collection_name="test_video"
-        )
+        mongo_client = pymongo.MongoClient(os.environ.get("MONGODB_CONNECTION_STRING"))
+        db = mongo_client["video_transcripts"]
+        self.collection = db["transcripts"]
+        self.videos_collection = db["videos"]
 
 
     def initiate_client(self):
@@ -104,45 +106,61 @@ class OpenAIService:
     async def generate_video_prompt_response(self, user_prompt: str):
         try:
             prompt = PromptTemplate(
-                template="""Given the context about a video. Answer the user queries with information from the video.
+                template="""Given the context about a video. Answer the user queries with information from the video. The start time is given in the brackets ('[' and ']').
+                Please output the 'start' time (in mm:ss format) from the context whenever you provide an answer.
                 
                 Context: {context}
-                Timestamps: {timestamps}
                 Human: {input}
                 
                 AI:""",
-                input_variables=["context", "timestamps", "input"]
+                input_variables=["context", "input"]
             )
             llm = AzureChatOpenAI(
                 azure_endpoint=self.azure_endpoint,
                 api_key=self.api_key,
                 api_version=self.api_version,
-                deployment_name="test-123",
+                azure_deployment=self.deployment_name,
             )
 
-            # Perform a retrieval with metadata
-            retrieval_results = self.vectordb.as_retriever().invoke(user_prompt)
+            query_embedding = np.array(self.embedding_function.embed_query(user_prompt))
 
-            print(retrieval_results)
+            # Perform a retrieval with metadata
+            retrieval_results = self.collection.find({}, {"text": 1, "embedding": 1, "metadata": 1})
+
+            # Calculate cosine similarity
+            similarities = []
+            for doc in retrieval_results:
+                doc_embedding = np.array(doc["embedding"])
+                similarity_score = cosine_similarity(query_embedding.reshape(1, -1), doc_embedding)[0][0]
+                similarities.append((similarity_score, doc))
+
+            # Sort and display top results
+            similarities.sort(reverse=True, key=lambda x: x[0])
 
             # Extract context and metadata (timestamps) from the retrieved documents
-            context = " ".join([f"[{doc.metadata.get('start')} - {doc.metadata.get('end')}]" + doc.page_content for doc in retrieval_results])
-            timestamps = " ".join([f"[{doc.metadata.get('start')} - {doc.metadata.get('end')}]" for doc in retrieval_results])
+            documents = [
+                Document(
+                    page_content=f"[{convert_seconds_to_mm_ss(doc['metadata'].get('start'))}] {doc['text']}",
+                    metadata={
+                        "start": convert_seconds_to_mm_ss(doc['metadata'].get('start')),
+                        "end": convert_seconds_to_mm_ss(doc['metadata'].get('end'))
+                    }
+                )
+                for _, doc in similarities[:5]
+            ]
 
             combine_docs_chain = create_stuff_documents_chain(llm, prompt)
 
-            # Create RAG chain with context and timestamps
-            rag_chain = create_retrieval_chain(
-                retriever=self.vectordb.as_retriever(),
-                combine_docs_chain=combine_docs_chain
-            )
-
             # Return the response
-            return rag_chain.invoke({
-                "context": context,
-                "timestamps": timestamps,
+            return combine_docs_chain.invoke({
+                "context": documents,
                 "input": user_prompt
             })
         except Exception as ex:
             print(ex)
             return ex
+
+def convert_seconds_to_mm_ss(seconds):
+    minutes = int(seconds // 60)
+    seconds = int(seconds % 60)
+    return f"{minutes:02}:{seconds:02}"
