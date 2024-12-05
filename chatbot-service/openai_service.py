@@ -1,29 +1,51 @@
 # Add OpenAI library
+import json
 import os
+
+import chromadb
+import numpy as np
+import pymongo
+from dotenv import load_dotenv
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains.retrieval import create_retrieval_chain
+from langchain_core.documents import Document
+from langchain_openai import AzureChatOpenAI
+
+from langchain_community.embeddings import SentenceTransformerEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain_core.prompts import PromptTemplate
 from openai import AsyncAzureOpenAI
-import logging
+from sklearn.metrics.pairwise import cosine_similarity
+
+load_dotenv()
 
 
 class OpenAIService:
     def __init__(self):
-        self.azure_endpoint = os.environ.get("YOUR_ENDPOINT_NAME")
-        self.api_key = os.environ.get("YOUR_API_KEY")
+        self.azure_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+        self.api_key = os.environ.get("AZURE_OPENAI_API_KEY")
         self.deployment_name = os.environ.get("YOUR_DEPLOYMENT_NAME")
-        self.api_version = os.environ.get("YOUR_API_VERSION")
+        self.api_version = os.environ.get("OPENAI_API_VERSION")
         self.client = self.initiate_client()
-        self.logger = logging.getLogger()
-        logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.DEBUG)
         self.system_message = ""
         self.grounding_text = ""
         try:
             self.system_message = open(file="system.txt", encoding="utf8").read().strip()
         except Exception as ex:
-            self.logger.warning(ex)
+            print(ex)
         try:
             self.grounding_text = open(file="grounding.txt", encoding="utf8").read().strip()
         except Exception as ex:
-            self.logger.warning(ex)
+            print(ex)
         self.messages_array = [{"role": "system", "content": self.system_message}]
+        self.embedding_function = SentenceTransformerEmbeddings(
+            model_name="all-MiniLM-L6-v2"
+        )
+        mongo_client = pymongo.MongoClient(os.environ.get("MONGODB_CONNECTION_STRING"))
+        db = mongo_client["video_transcripts"]
+        self.collection = db["transcripts"]
+        self.videos_collection = db["videos"]
+
 
     def initiate_client(self):
         try:
@@ -33,7 +55,8 @@ class OpenAIService:
                 api_version=self.api_version
             )
         except Exception as ex:
-            self.logger.warning(ex)
+            print(self.azure_endpoint)
+            print(ex)
 
     async def create_response(self, prompt: str):
         response = await self.client.chat.completions.create(
@@ -47,6 +70,7 @@ class OpenAIService:
 
         # Print the response
         print("Response: " + generated_text + "\n")
+        return generated_text
 
     async def create_response_history(self, prompt: str):
         self.messages_array.append({"role": "user", "content": self.grounding_text + prompt})
@@ -72,9 +96,71 @@ class OpenAIService:
                 continue
 
             print("\nSending request for summary to Azure OpenAI endpoint...\n\n")
-            self.logger.info("History Enabled: " + str(history))
+            print("History Enabled: " + str(history))
             if history:
                 self.messages_array = [{"role": "system", "content": self.system_message}]
                 await self.create_response_history(input_text)
             else:
                 await self.create_response(input_text)
+
+    async def generate_video_prompt_response(self, user_prompt: str):
+        try:
+            prompt = PromptTemplate(
+                template="""Given the context about a video. Answer the user queries with information from the video. The start time is given in the brackets ('[' and ']').
+                Please output the 'start' time (in mm:ss format) from the context whenever you provide an answer.
+                
+                Context: {context}
+                Human: {input}
+                
+                AI:""",
+                input_variables=["context", "input"]
+            )
+            llm = AzureChatOpenAI(
+                azure_endpoint=self.azure_endpoint,
+                api_key=self.api_key,
+                api_version=self.api_version,
+                azure_deployment=self.deployment_name,
+            )
+
+            query_embedding = np.array(self.embedding_function.embed_query(user_prompt))
+
+            # Perform a retrieval with metadata
+            retrieval_results = self.collection.find({}, {"text": 1, "embedding": 1, "metadata": 1})
+
+            # Calculate cosine similarity
+            similarities = []
+            for doc in retrieval_results:
+                doc_embedding = np.array(doc["embedding"])
+                similarity_score = cosine_similarity(query_embedding.reshape(1, -1), doc_embedding)[0][0]
+                similarities.append((similarity_score, doc))
+
+            # Sort and display top results
+            similarities.sort(reverse=True, key=lambda x: x[0])
+
+            # Extract context and metadata (timestamps) from the retrieved documents
+            documents = [
+                Document(
+                    page_content=f"[{convert_seconds_to_mm_ss(doc['metadata'].get('start'))}] {doc['text']}",
+                    metadata={
+                        "start": convert_seconds_to_mm_ss(doc['metadata'].get('start')),
+                        "end": convert_seconds_to_mm_ss(doc['metadata'].get('end'))
+                    }
+                )
+                for _, doc in similarities[:5]
+            ]
+
+            combine_docs_chain = create_stuff_documents_chain(llm, prompt)
+
+            # Return the response
+            return combine_docs_chain.invoke({
+                "context": documents,
+                "input": user_prompt
+            })
+        except Exception as ex:
+            print(ex)
+            return ex
+
+def convert_seconds_to_mm_ss(seconds):
+    minutes = int(seconds // 60)
+    seconds = int(seconds % 60)
+    return f"{minutes:02}:{seconds:02}"
