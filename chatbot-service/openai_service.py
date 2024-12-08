@@ -16,6 +16,7 @@ from langchain_community.vectorstores import Chroma
 from langchain_core.prompts import PromptTemplate
 from openai import AsyncAzureOpenAI
 from sklearn.metrics.pairwise import cosine_similarity
+from utils import convert_seconds_to_mm_ss
 
 load_dotenv()
 
@@ -125,7 +126,7 @@ class OpenAIService:
             query_embedding = np.array(self.embedding_function.embed_query(user_prompt))
 
             # Perform a retrieval with metadata
-            retrieval_results = self.collection.find({}, {"text": 1, "embedding": 1, "metadata": 1})
+            retrieval_results = self.collection.find({}, {"text": 1, "embedding": 1, "metadata": 1, "frames": 1})
 
             # Calculate cosine similarity
             similarities = []
@@ -137,17 +138,25 @@ class OpenAIService:
             # Sort and display top results
             similarities.sort(reverse=True, key=lambda x: x[0])
 
+            documents = similarities[:5]
+
+            context = ""
+            for _, doc in documents:
+                start_time = convert_seconds_to_mm_ss(doc["metadata"].get("start", 0))
+                frames = doc.get("frames", [])
+
+                frame_details = "\n".join([
+                    f"  - Frame at {convert_seconds_to_mm_ss(frame['timestamp'])}: {frame['tag']['caption']['text']}\n"
+                    f"    Dense Captions: {', '.join([caption['text'] for caption in frame['tag']['dense_captions']])}"
+                    for frame in frames
+                ])
+
+                context += f"[{start_time}] {doc['text']}\n"
+                if frames:
+                    context += f"Associated Frames:\n{frame_details}\n"
+
             # Extract context and metadata (timestamps) from the retrieved documents
-            documents = [
-                Document(
-                    page_content=f"[{convert_seconds_to_mm_ss(doc['metadata'].get('start'))}] {doc['text']}",
-                    metadata={
-                        "start": convert_seconds_to_mm_ss(doc['metadata'].get('start')),
-                        "end": convert_seconds_to_mm_ss(doc['metadata'].get('end'))
-                    }
-                )
-                for _, doc in similarities[:5]
-            ]
+            documents = [Document(page_content=context)]
 
             combine_docs_chain = create_stuff_documents_chain(llm, prompt)
 
@@ -159,8 +168,3 @@ class OpenAIService:
         except Exception as ex:
             print(ex)
             return ex
-
-def convert_seconds_to_mm_ss(seconds):
-    minutes = int(seconds // 60)
-    seconds = int(seconds % 60)
-    return f"{minutes:02}:{seconds:02}"
