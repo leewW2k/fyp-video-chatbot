@@ -1,13 +1,9 @@
 import base64
 import json
 import os
+from datetime import datetime
 
 from azure.storage.blob import BlobServiceClient
-from langchain_community.document_loaders.generic import GenericLoader
-from langchain_community.document_loaders.parsers.audio import OpenAIWhisperParser, OpenAIWhisperParserLocal
-from langchain_community.document_loaders import YoutubeAudioLoader
-
-from langchain_community.embeddings import SentenceTransformerEmbeddings
 
 import dotenv
 
@@ -38,68 +34,6 @@ class VideoRetriever:
         self.vision_service = vision_service
         self.database_service = database_service
         self.storage_service = storage_service
-
-    def retrieve_video(self):
-        try:
-            url = [self.video_url]
-            if self.local:
-                loader = GenericLoader(
-                    YoutubeAudioLoader(url, self.save_dir), OpenAIWhisperParserLocal()
-                )
-            else:
-                loader = GenericLoader(YoutubeAudioLoader(
-                    urls=url,
-                    save_dir=self.save_dir
-                ), OpenAIWhisperParser(
-                    api_key=os.environ.get("WHISPER_API_KEY"),
-                    base_url=os.environ.get("WHISPER_ENDPOINT")
-                ))
-
-            docs = loader.load()
-
-            model = whisper.load_model("base")
-            files = [f for f in os.listdir(self.save_dir) if os.path.isfile(os.path.join(self.save_dir, f))]
-            audio = whisper.load_audio(self.save_dir + "/" + files[0])
-            result = model.transcribe(audio)
-
-            combine_docs = self.combine_sentences_with_context(result["segments"])
-
-            texts = [doc["text"] for doc in combine_docs]
-            metadata = [
-                {
-                    "start": doc.get("start", 0.0) if doc["start"] is not None else 0.0,
-                    "end": doc.get("end", 0.0) if doc["end"] is not None else 0.0
-                }
-                for doc in combine_docs
-            ]
-
-            video_document = {
-                "video_url": url,
-                "transcript": ''.join(texts),
-                "chunk_count": len(texts)
-            }
-            video_insert_result = self.database_service.insert_video(video_document)
-            video_id = video_insert_result.inserted_id
-
-            # Build an index
-            embedding_function = SentenceTransformerEmbeddings(
-                model_name=self.model_name
-            )
-            # Generate and store embeddings
-            for i, chunk in enumerate(texts):
-                embedding = embedding_function.embed_documents([chunk])
-                document = {
-                    "video_id": video_id,
-                    "transcript_id": f"chunk_{i}",
-                    "text": chunk,
-                    "embedding": embedding,
-                    "metadata": metadata[i]
-                }
-                self.database_service.insert_embedding(document)
-
-            print("Documents successfully inserted into Azure Cosmos DB")
-        except Exception as e:
-            print(e)
 
     # Function to combine short sentences into context windows
     def combine_sentences_with_context(self, segments, max_chunk_size=1000):
@@ -160,8 +94,14 @@ class VideoRetriever:
                     # Upload the blob only if it does not exist
                     blob_client.upload_blob(decoded_bytes, overwrite=True)
                     print(f"Uploaded {video.filename} to Azure Blob Storage.")
+                    video_document = {
+                        "filename": video.filename,
+                        "upload_date": datetime.now(),
+                    }
+                    video_id = self.database_service.insert_video_entry(video_document).inserted_id
                 else:
                     print(f"{video.filename} already exists in Azure Blob Storage. Skipping upload.")
+                    video_id = self.database_service.find_video_entry(video.filename)
 
                 local_video_path = os.path.join(self.save_dir, video.filename)
                 process_file(fp=local_video_path, mode='wb', content=decoded_bytes)
@@ -190,6 +130,10 @@ class VideoRetriever:
                     output = self.vision_service.analyze_image(image_data=image_data)
                     timestamp_frame["tag"] = output
 
-                self.database_service.upload_to_db(transcript=transcript_text, frames_timestamp=timestamp_frames)
+                self.database_service.upload_to_db(
+                    transcript=transcript_text,
+                    frames_timestamp=timestamp_frames,
+                    video_reference_id=video_id,
+                )
         except Exception as e:
             print(e)

@@ -1,6 +1,7 @@
 from typing import List, Any, Mapping
 
 import numpy as np
+from bson import ObjectId
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.documents import Document
 from langchain_openai import AzureChatOpenAI
@@ -41,7 +42,6 @@ class OpenAIService:
     ):
         self.azure_endpoint = azure_endpoint
         self.api_key = api_key
-        self.deployment_name = deployment_name
         self.api_version = api_version
         self.database_service = database_service
         self.client = self.initiate_client()
@@ -50,8 +50,14 @@ class OpenAIService:
         except Exception as e:
             print(e)
             self.prompt_template = ""
-        self.temperature = temperature
         self.embedding_function = SentenceTransformerEmbeddings(model_name=embedding_model)
+        self.chat_model = AzureChatOpenAI(
+            azure_endpoint=self.azure_endpoint,
+            api_key=self.api_key,
+            api_version=self.api_version,
+            azure_deployment=deployment_name,
+            temperature=temperature
+        )
 
     def initiate_client(self):
         """
@@ -74,35 +80,30 @@ class OpenAIService:
         except Exception as ex:
             print(ex)
 
-    async def generate_video_prompt_response(self, user_prompt: str):
+    async def generate_video_prompt_response(self, user_prompt: str, video_id: str):
         """
-        Generate response based on user prompt.
+        Generate response based on user prompt and selected video.
 
         Args:
             user_prompt (str): User prompt to query chatbot. Required.
+            video_id (str): Video ID of the video selected. Required.
         """
         try:
             prompt = PromptTemplate(
                 template=self.prompt_template,
                 input_variables=["context", "input"]
             )
-            llm = AzureChatOpenAI(
-                azure_endpoint=self.azure_endpoint,
-                api_key=self.api_key,
-                api_version=self.api_version,
-                azure_deployment=self.deployment_name,
-                temperature=self.temperature
-            )
-
-            query_embedding = np.array(self.embedding_function.embed_query(user_prompt))
 
             # Perform a retrieval with metadata
+            args = {"video_reference_id": ObjectId(video_id)}
             retrieval_results = self.database_service.retrieve_results_embedding(
-                kwargs={"text": 1, "embedding": 1, "metadata": 1, "frames": 1}
+                kwargs={"text": 1, "embedding": 1, "metadata": 1, "frames": 1},
+                args=args
             )
 
             # Calculate cosine similarity
             similarities = []
+            query_embedding = np.array(self.embedding_function.embed_query(user_prompt))
             for doc in retrieval_results:
                 doc_embedding = np.array(doc["embedding"])
                 similarity_score = cosine_similarity(query_embedding.reshape(1, -1), doc_embedding)[0][0]
@@ -118,7 +119,7 @@ class OpenAIService:
             # Extract context and metadata (timestamps) from the retrieved documents
             documents = [Document(page_content=context)]
 
-            combine_docs_chain = create_stuff_documents_chain(llm, prompt)
+            combine_docs_chain = create_stuff_documents_chain(self.chat_model, prompt)
 
             # Generate the full prompt with context and input
             final_prompt = prompt.format(context=context, input=user_prompt)
@@ -147,19 +148,18 @@ class OpenAIService:
         """
         context = ""
         for _, doc in documents:
-            start_time = convert_seconds_to_mm_ss(doc["metadata"].get("start", 0))
             frames = doc.get("frames", [])
 
             frame_details = "\n".join([
-                f"  - Frame at {convert_seconds_to_mm_ss(frame['timestamp'])}: {frame['tag']['caption']['text']}\n"
-                f"    Dense Captions: {', '.join([caption['text'] for caption in frame['tag']['dense_captions']])}\n"
-                f"    Lines: {', '.join([read['line'] for read in frame['tag']['read']])}\n"
-                f"    Tags: {', '.join([tag['name'] for tag in frame['tag']['tags']])}\n"
-                f"    Objects: {', '.join([obj['name'] for obj in frame['tag']['objects']])}\n"
+                f"  - Frame at {convert_seconds_to_mm_ss(frame.get('timestamp', 0))}: {frame.get('tag', {}).get('caption', {}).get('text', '')}\n"
+                f"    Dense Captions: {', '.join([caption.get('text', '') for caption in frame.get('tag', {}).get('dense_captions', [])])}\n"
+                f"    Lines: {', '.join([read.get('line', '') for read in frame.get('tag', {}).get('read', [])])}\n"
+                f"    Tags: {', '.join([tag.get('name', '') for tag in frame.get('tag', {}).get('tags', [])])}\n"
+                f"    Objects: {', '.join([obj.get('name', '') for obj in frame.get('tag', {}).get('objects', [])])}\n"
                 for frame in frames
             ])
 
-            context += f"[{start_time}] {doc['text']}\n"
+            context += f"Transcript: {doc['text']}\n"
             if frames:
                 context += f"Associated Frames:\n{frame_details}\n"
         return context

@@ -60,54 +60,65 @@ class VisionService:
         )
 
         output = {}
-
-        if hasattr(result, 'caption') and result.caption:
-            output["caption"] = {
-                "text": getattr(result.caption, 'text', None),
-                "confidence": getattr(result.caption, 'confidence', None)
-            }
-
-        if hasattr(result, 'dense_captions') and result.dense_captions:
-            output["dense_captions"] = [
-                {
-                    "text": getattr(caption, 'text', None),
-                    "confidence": getattr(caption, 'confidence', None)
+        try:
+            if hasattr(result, 'caption') and result.caption:
+                output["caption"] = {
+                    "text": getattr(result.caption, 'text', None),
+                    "confidence": getattr(result.caption, 'confidence', None)
                 }
-                for caption in getattr(result.dense_captions, 'list', [])
-            ]
 
-        if hasattr(result, 'read') and result.read and hasattr(result.read, 'blocks'):
-            output["read"] = [
-                {
-                    "line": getattr(line, 'text', None),
-                    "words": [
+            if hasattr(result, 'dense_captions') and result.dense_captions:
+                output["dense_captions"] = [
+                    {
+                        "text": getattr(caption, 'text', None),
+                        "confidence": getattr(caption, 'confidence', None)
+                    }
+                    for caption in getattr(result.dense_captions, 'list', [])
+                ]
+
+            if hasattr(result, 'read') and result.read and hasattr(result.read, 'blocks'):
+                blocks = result.read.blocks
+                if len(blocks) > 0:
+                    lines = blocks[0].get("lines", [])
+                    if isinstance(lines, list):
+                        output["read"] = [
+                            {
+                                "line": getattr(line, 'text', None),
+                                "words": [
+                                    {
+                                        "text": getattr(word, 'text', None),
+                                        "confidence": getattr(word, 'confidence', None)
+                                    }
+                                    for word in getattr(line, 'words', [])
+                                ]
+                            }
+                            for line in lines
+                        ]
+
+            if hasattr(result, 'tags') and result.tags:
+                output["tags"] = [
+                    {
+                        "name": getattr(tag, 'name', None),
+                        "confidence": getattr(tag, 'confidence', None)
+                    }
+                    for tag in getattr(result.tags, 'list', [])
+                ]
+
+            if hasattr(result, 'objects') and result.objects:
+                object_list = getattr(result.objects, 'list', [])
+                if isinstance(object_list, list):
+                    output["objects"] = [
                         {
-                            "text": getattr(word, 'text', None),
-                            "confidence": getattr(word, 'confidence', None)
+                            "name": getattr(obj.tags[0], 'name', None) if
+                            getattr(obj, 'tags', None) and len(obj.tags) > 0 else None,
+                            "confidence": getattr(obj.tags[0], 'confidence', None) if
+                            getattr(obj, 'tags', None) and len(obj.tags) > 0 else None
                         }
-                        for word in getattr(line, 'words', [])
+                        for obj in object_list if hasattr(obj, 'tags') and isinstance(obj.tags, list)
                     ]
-                }
-                for line in result.read.blocks[0].get("lines", [])
-            ]
 
-        if hasattr(result, 'tags') and result.tags:
-            output["tags"] = [
-                {
-                    "name": getattr(tag, 'name', None),
-                    "confidence": getattr(tag, 'confidence', None)
-                }
-                for tag in getattr(result.tags, 'list', [])
-            ]
-
-        if hasattr(result, 'objects') and result.objects:
-            output["objects"] = [
-                {
-                    "name": getattr(obj.tags[0], 'name', None) if obj.tags else None,
-                    "confidence": getattr(obj.tags[0], 'confidence', None) if obj.tags else None
-                }
-                for obj in getattr(result.objects, 'list', [])
-            ]
+        except Exception as e:
+            print(e)
 
         return output
 
@@ -126,6 +137,14 @@ class VisionService:
         """
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
+        else:
+            for file_name in os.listdir(output_dir):
+                file_path = os.path.join(output_dir, file_name)
+                try:
+                    if os.path.isfile(file_path) or os.path.islink(file_path):
+                        os.unlink(file_path)
+                except Exception as e:
+                    print(f"Failed to delete {file_path}. Reason: {e}")
 
         # Open the video file
         video_capture = cv2.VideoCapture(video_path)

@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Dict, Any
 
 import pymongo
@@ -16,8 +17,9 @@ class AzureDatabaseService:
     Args:
         mongo_connection_string (str): MongoDB Connection String. Example: mongodb+srv://<username>:<password>@<resource>.mongocluster.cosmos.azure.com/<...>. Required.
         database_name (str): MongoDB Database Name. Required.
-        video_collection_name (str): Azure OpenAI Deployment Name. Default: "videos".
-        embedding_collection_name (str): Azure OpenAI API Version. Default: "transcripts".
+        chunk_collection_name (str): Collection Name to store chunks. Default: "chunk".
+        embedding_collection_name (str): Collection Name to store embeddings and other metadata. Default: "transcript".
+        video_collection_name (str): Collection Name to store video information. Default: "video".
         embedding_model (str): Embedding Model. Default: "all-MiniLM-L6-v2".
     """
 
@@ -25,15 +27,17 @@ class AzureDatabaseService:
             self,
             mongo_connection_string: str,
             database_name: str,
-            video_collection_name: str = "videos",
-            embedding_collection_name: str = "transcripts",
+            chunk_collection_name: str = "chunk",
+            embedding_collection_name: str = "transcript",
+            video_collection_name: str = "video",
             embedding_model: str = "all-MiniLM-L6-v2"
     ):
         mongo_client = pymongo.MongoClient(mongo_connection_string)
         db = mongo_client[database_name]
-        self.collection = db[embedding_collection_name]
-        self.videos_collection = db[video_collection_name]
+        self.embedding_collection = db[embedding_collection_name]
+        self.chunk_collection = db[chunk_collection_name]
         self.embedding_model = embedding_model
+        self.video_collection = db[video_collection_name]
 
     def retrieve_results_embedding(self, kwargs: Dict[str, Any] = None, args: Dict[str, Any] = None):
         """
@@ -50,12 +54,12 @@ class AzureDatabaseService:
             kwargs = kwargs or {}
             args = args or {}
 
-            retrieval_results = self.collection.find(args, kwargs)
+            retrieval_results = self.embedding_collection.find(args, kwargs)
             return retrieval_results
         except Exception as ex:
             print(ex)
 
-    def upload_to_db(self, transcript, frames_timestamp):
+    def upload_to_db(self, transcript, frames_timestamp, video_reference_id):
         combine_docs = self.combine_sentences_with_context(transcript)
 
         texts = [doc["text"] for doc in combine_docs]
@@ -68,11 +72,13 @@ class AzureDatabaseService:
         ]
 
         video_document = {
+            "video_reference_id": video_reference_id,
             "video_url": "",
             "transcript": ''.join(texts),
-            "chunk_count": len(texts)
+            "chunk_count": len(texts),
+            "created_time": datetime.now()
         }
-        video_insert_result = self.videos_collection.insert_one(video_document)
+        video_insert_result = self.chunk_collection.insert_one(video_document)
         video_id = video_insert_result.inserted_id
 
         # Build an index
@@ -107,19 +113,21 @@ class AzureDatabaseService:
             embedding = embedding_function.embed_documents([combined_text])
 
             document = {
+                "video_reference_id": video_reference_id,
                 "video_id": video_id,
                 "transcript_id": f"chunk_{i}",
                 "text": chunk,
                 "embedding": embedding,
                 "metadata": metadata[i],
-                "frames": relevant_frames
+                "frames": relevant_frames,
+                "created_time": datetime.now(),
             }
-            self.collection.insert_one(document)
+            self.embedding_collection.insert_one(document)
 
         print("Documents successfully inserted into Azure Cosmos DB")
 
     # Function to combine short sentences into context windows
-    def combine_sentences_with_context(self, segments, max_chunk_size=1000):
+    def combine_sentences_with_context(self, segments, max_chunk_size=2000, chunk_overlap=500):
         combined_texts = []
         current_chunk = []
         current_chunk_size = 0
@@ -140,9 +148,10 @@ class AzureDatabaseService:
                     "end": segment['end']
                 })
                 # Start a new chunk
-                current_chunk = [convert_seconds_to_mm_ss(start_time_segment) + " " + text]
-                current_chunk_size = text_size
-                current_start = segment['start']
+                overlap_text = ' '.join(current_chunk)[-chunk_overlap:]
+                current_chunk = [overlap_text + convert_seconds_to_mm_ss(start_time_segment) + " " + text]
+                current_chunk_size = text_size + len(overlap_text)
+                current_start = current_end
             else:
                 # Add sentence to the current chunk
                 current_chunk.append(" " + convert_seconds_to_mm_ss(start_time_segment) + text)
@@ -160,9 +169,21 @@ class AzureDatabaseService:
         return combined_texts
 
     def insert_video(self, video_document):
-        return self.videos_collection.insert_one(video_document)
+        return self.chunk_collection.insert_one(video_document)
 
     def insert_embedding(self, document):
-        return self.collection.insert_one(document)
+        return self.embedding_collection.insert_one(document)
 
+    def insert_video_entry(self, video_document):
+        return self.video_collection.insert_one(video_document)
+
+    def find_video_entry(self, filename):
+        return self.video_collection.find_one({"filename": filename})["_id"]
+
+    def get_video_list(self):
+        video_list = list(self.video_collection.find())
+        for video in video_list:
+            if "_id" in video:
+                video["_id"] = str(video["_id"])  # Convert ObjectId to string
+        return video_list
 

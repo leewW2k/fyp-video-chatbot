@@ -1,6 +1,3 @@
-from typing import Any
-
-
 def convert_seconds_to_mm_ss(seconds: int):
     """
     Method to convert seconds to minutes & seconds.

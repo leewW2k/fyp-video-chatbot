@@ -1,3 +1,4 @@
+import base64
 import json
 
 from azure.storage.blob import BlobServiceClient
@@ -54,3 +55,11 @@ class AzureBlobService:
     def upload(self, json_input):
         if not self.blob_client.exists():
             self.blob_client.upload_blob(json_input, overwrite=True)
+
+    def fetch_video_from_blob(self, blob_name):
+        container_client = self.blob_service_client.get_container_client(self.azure_container_name)
+
+        blob_client = container_client.get_blob_client(blob_name)
+        blob_data = blob_client.download_blob().readall()
+
+        return base64.b64encode(blob_data).decode("utf-8")

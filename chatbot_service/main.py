@@ -4,6 +4,7 @@ from typing import List
 from fastapi import FastAPI
 
 from azure_blob_service import AzureBlobService
+from utils import process_file
 from vision_service import VisionService
 from database_service import AzureDatabaseService
 from openai_service import OpenAIService
@@ -38,6 +39,7 @@ app = FastAPI()
 
 class PromptRequest(BaseModel):
     prompt: str
+    video_id: str
 
 class Video(BaseModel):
     video_url: str
@@ -53,17 +55,8 @@ class VideoList(BaseModel):
 @app.post("/prompt/video")
 async def prompt_chatbot(request: PromptRequest):
     try:
-        response = await service.generate_video_prompt_response(request.prompt)
+        response = await service.generate_video_prompt_response(request.prompt, request.video_id)
         return {"response": response}
-    except Exception as ex:
-        return ex
-
-
-@app.post("/context/video")
-async def create_video_context(request: Video):
-    try:
-        video_retriever.retrieve_video()
-        return {"response": "completed"}
     except Exception as ex:
         return ex
 
@@ -72,5 +65,15 @@ async def create_video_context(request: VideoList):
     try:
         video_retriever.process_blob(video_data=request.file_list)
         return {"response": "completed"}
+    except Exception as ex:
+        return ex
+
+@app.get("/videos")
+async def get_videos():
+    try:
+        response = database_service.get_video_list()
+        for video in response:
+            video["base64_video"] = azure_blob_service.fetch_video_from_blob(video["filename"])
+        return {"response": response}
     except Exception as ex:
         return ex
